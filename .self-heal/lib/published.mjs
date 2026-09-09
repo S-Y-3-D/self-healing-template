@@ -10,6 +10,10 @@ export function checkPublished(files,evidence,runId) {
   if(!copy[ledger]) throw new Error('Missing expected ledger');delete copy[ledger];
   if(treeDigest(copy)!==evidence.treeDigest) throw new Error('Published files changed after verification');
 }
+export function isHealing(pr,files) {
+  return pr.head.ref.startsWith('heal/fix-') || /^Heal-(Test-PR|Run):/m.test(pr.body??'')
+    || files.some(f=>/^\.self-heal\/ledger\/\d+\.json$/.test(f.filename));
+}
 async function readEvidence(api,runId) {
   const run=await api.get(`${api.root}/actions/runs/${runId}`);
   const config=await api.configuration();
@@ -35,7 +39,7 @@ async function readEvidence(api,runId) {
 export async function refreshGates(api) {
   const prs=await api.list(`${api.root}/pulls?state=open`);
   for(const pr of prs) {
-    const healing=pr.head.ref.startsWith('heal/fix-') || /^Heal-(Test-PR|Run):/m.test(pr.body??'');
+    const healing=isHealing(pr,await api.list(`${api.root}/pulls/${pr.number}/files`));
     const status={context:'Heal authorization',target_url:`https://github.com/${api.repository}/actions`};
     if(!healing) {
       await api.post(`${api.root}/statuses/${pr.head.sha}`,{...status,state:'success',description:'Ordinary PR: standard CI and human review apply'});
