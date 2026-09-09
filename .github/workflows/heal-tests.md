@@ -13,7 +13,7 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
-engine: copilot
+engine: claude
 concurrency:
   job-discriminator: ${{ github.run_id }}
 network: defaults
