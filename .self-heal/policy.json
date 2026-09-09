@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "enabled": false,
+  "roles": {
+    "maintainers": [105170917],
+    "testOwners": [105170917],
+    "administrators": [105170917]
+  },
+  "implementationPaths": ["src/"],
+  "testPaths": ["tests/"],
+  "maxFiles": 10,
+  "maxBytes": 100000
+}

@@ -1,0 +1,12 @@
+{
+  "name": "self-healing-template",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test .self-heal/test/*.test.mjs",
+    "test:app": "node --test tests/*.test.mjs",
+    "heal:doctor": "node .self-heal/bin/heal.mjs doctor"
+  }
+}

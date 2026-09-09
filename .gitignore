@@ -1,0 +1,4 @@
+node_modules/
+.heal-output/
+.heal-candidate.json
+*.log

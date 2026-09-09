@@ -1,0 +1,38 @@
+name: Heal authorization refresh
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  issue_comment:
+    types: [created, edited, deleted]
+  workflow_run:
+    workflows: [Heal verify and publish]
+    types: [completed]
+  workflow_dispatch:
+  schedule:
+    - cron: '*/10 * * * *'
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  actions: read
+  statuses: write
+concurrency:
+  group: heal-authorization-refresh
+  cancel-in-progress: false
+jobs:
+  refresh:
+    if: vars.HEAL_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      # Privileged metadata-only workflow. Never check out or execute PR code.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Refresh gates using live decisions and immutable Actions evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .self-heal/bin/heal.mjs gate
