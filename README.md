@@ -1,76 +1,89 @@
 # Self-healing repository template
 
-AI proposes tests and fixes. Humans approve the scope and exact test revision. Deterministic checks control what can be published.
+AI discusses issues, proposes tests, and attempts fixes only when an authorized human requests a run. Human-approved tests and isolated verification control publication. Everything in the normal workflow happens on GitHub.
 
-**Status: initial implementation, disabled by default.** Node.js projects using the built-in `node:test` runner and standard library are supported first. The real AI issue-to-PR path requires an enabled GAW engine and repository protections; local tests alone do not prove that integration.
+## Start with a discussion
 
-## Workflow
+1. Open an issue and describe the desired behavior. This makes **no model call**.
+2. A configured maintainer posts `/heal discuss` as a new standalone issue comment.
+3. AI reads the issue, comments, linked PRs, reviews, and relevant code and posts one response.
+4. Discuss normally. Mentioning another person, editing a comment, submitting a review, or replying normally does not start AI. Post `/heal discuss` whenever another AI response is wanted.
+5. After successful discussion, the controller posts the complete `/heal accept <scope-hash> <policy-hash>` command. Copy it into a new comment to accept the current issue body. If discussion changes the requirement, update the issue body and request another discussion first.
 
-1. Anyone opens a bug report. GAW triages it and asks for missing information.
-2. A configured maintainer approves the exact issue body and policy digest.
-3. Run **Heal test proposal** with the issue number. AI opens a tests-only draft PR.
-4. A configured human test owner approves that exact PR head using GitHub's **Approve** review.
-5. Run **Heal implementation** with the test PR number. Before inference, the controller checks live approvals and proves the approved tests fail on assertions against the baseline. AI returns candidate file data, without publishing a fix branch.
-6. **Heal verify and publish** validates the source run, reconstructs immutable snapshots, and verifies baseline → expected regression failure → candidate success in separate Docker containers. Only then does its publisher create a draft fix PR, including tests and a ledger.
-7. **Heal authorization** checks current approvals and compares the PR contents with the trusted verification artifact. Required CI and human review control merging. Close the test proposal after the fix merges.
+No cloning or terminal is needed to obtain approval hashes. Ordinary contributors can discuss, but only configured human maintainers/administrators can request AI or accept scope. The current interface is slash commands, not a special @bot account.
 
-Test proposals are allowed to be red. Fix branches created by the publisher must be green before they are published. No automatic merge is implemented.
+## Commands
 
-## Adopt the template
+Post each command as an entire new comment on the issue or its linked PR. Quoted commands and edited requests cannot start inference.
 
-Choose **Use this template**, then configure your copy:
+| Command | What happens |
+| --- | --- |
+| `/heal discuss` | One discussion response and an exact scope approval command |
+| `/heal accept <scope-hash> <policy-hash>` | Records scope approval; no AI |
+| `/heal tests` | One tests-only PR for the accepted scope |
+| `/heal revise-tests 2` | New superseding test PR addressing PR #2's review feedback |
+| `/heal fix 2` | One fix attempt using PR #2's exact human-approved tests |
+| `/heal revise-fix 3` | One new fix attempt using PR #3's test reference and discussion feedback |
+| `/heal pause` | Blocks further work/publication and requests cancellation where possible |
+| `/heal revoke` | Withdraws scope acceptance and requests cancellation where possible |
+| `/heal resume <policy-hash>` | Clears a pause at the same or higher authority; no AI |
 
-1. Replace the numeric user IDs in `.self-heal/policy.json` and owners in `.github/CODEOWNERS`. Resolve IDs with `gh api users/YOUR_LOGIN --jq .id`. The initial IDs belong to `S-Y-3-D`; do not leave them in an unrelated installation.
-2. Place application code under `src/` and tests under `tests/`, or configure different top-level prefixes. Tests must end in `.test.mjs`. This initial adapter does not install external packages, build applications, or run arbitrary project commands.
-3. Configure Claude authentication following [GAW's engine documentation](https://github.github.com/gh-aw/reference/engines/). Generated workflows use Claude Code and expect the `ANTHROPIC_API_KEY` repository Actions secret. Inference and Actions may incur charges.
-4. Enable GitHub Actions PR creation in repository settings. This version publishes with `GITHUB_TOKEN`; generated PR CI may require **Approve workflows to run**. No PAT is given to candidate code.
-5. Configure a protected default branch: PRs required, at least one approving review, code-owner review, stale review dismissal, and required `Template CI / test` (select the actual emitted check) plus `Heal authorization`. Do not give the bot a bypass. The authorization gate checks automated fixes against their evidence; ordinary PRs receive a not-applicable success and still require CI and human review. **Do not enable unattended healing if your GitHub plan cannot enforce the required protections.**
-6. Create the `heal-publish` environment and configure a required human reviewer during the initial rollout.
-7. Set policy `enabled` to `true` through a reviewed change. Set repository Actions variable `HEAL_ENABLED=true` only after the setup above. Keep it unset/false while preparing.
+Approving scope does not generate tests. Approving tests does not generate a fix. Each AI stage needs its own explicit command. Do not manually dispatch or re-run an AI workflow: preflight rejects runs without their original recorded command, duplicate runs, edited/deleted command comments, or stale scope/policy/base.
 
-Run `npm run heal:doctor` for local policy validation. It does not audit remote branch protection or credentials.
+## Reviewing tests
 
-## Approving, pausing and revoking
+AI opens a draft PR containing only tests and explains the required behavior. Red regression tests are expected: they demonstrate the existing bug.
 
-To obtain the exact scope command locally (with `GH_TOKEN` and `GITHUB_REPOSITORY` set), run:
+If correct, use **Files changed → Review changes → Approve → Submit review**. Do not merge the tests-only PR. Then request `/heal fix <test-pr-number>`.
 
-```sh
-node .self-heal/bin/heal.mjs scope 123
-```
+If incorrect, submit **Request changes** explaining the desired behavior. A maintainer requests `/heal revise-tests <test-pr-number>`. The new proposal links its predecessor; prior objecting test owners must approve the new exact head to resolve their objections. Changing a test invalidates its approval. A stale proposal can be revised against the current base.
 
-Post its printed `/heal accept <scope-digest> <policy-digest>` as a **new issue comment**. The controller verifies the comment author's numeric GitHub ID; text claiming someone else's identity has no authority.
+The fixing agent can see the approved tests. It must fix application code, not weaken tests. A disputed test requires separate revision and fresh human approval.
 
-- `/heal pause` blocks work and publication.
-- `/heal resume <policy-digest>` clears a pause only at the same or higher authority level.
-- `/heal revoke` withdraws scope acceptance.
-- Administrators take precedence over maintainers. A maintainer cannot undo an administrator's pause or revocation. Test approval remains a separate role.
-- Dismiss a test review or submit **Request changes** to withdraw test approval. Any current configured test owner's outstanding objection blocks execution.
-- Changes to the issue body or policy require a fresh scope acceptance. Changes to test head require fresh test review. A moved base requires refreshing the test branch and restarting.
+## Fix verification and publication
 
-The MVP uses **current GitHub comments and reviews**, not an immutable event store. Editing/deleting an old pause/revoke comment removes that current-record control; use new commands to preserve history. Policy changes invalidate scope approval. A later release can add an append-only event ledger.
+The controller first checks current authorization and proves the baseline passes and the proposed regression fails on assertions. AI then returns one candidate file patch.
 
-Approval refresh runs on PR/comment events and every ten minutes. Review changes are observed by the next refresh; run **Heal authorization refresh** manually for immediate rechecking. The privileged gate deliberately does not use the PR-controlled `pull_request_review` workflow event. GitHub event processing is asynchronous: revocation and merging are not one atomic transaction. During a disputed merge, use GitHub's blocking review and pause controls directly as well.
+The trusted verifier reconstructs immutable snapshots and runs baseline → regression → candidate in separate Docker containers. Candidate code receives no credentials or network access. Changes outside implementation paths, changed tests, skipped/empty tests, syntax-only regressions, and altered verification evidence are rejected.
 
-## Verification boundary
+A passing candidate waits for a human approval in the `heal-publish` environment before creating a draft fix PR containing the approved tests, application changes, and a ledger. Required CI, live `Heal authorization`, and human merge review still apply. There is no automatic merge.
 
-- AI output is a bounded JSON list of implementation file changes. Paths outside configured implementation prefixes, duplicates, traversal, symlinks and submodules are rejected.
-- The immutable base-to-test snapshot diff must contain tests only. This is checked independently of GitHub's mutable PR file list.
-- Scope authorization includes the current policy digest. Exact test-head approvals are re-read before implementation and publication.
-- Production tests run in disposable Docker containers with no network, credentials, capabilities or writable source mount. They use Node's built-in runner; empty suites, skipped tests and non-assertion regression failures are rejected.
-- Candidate and test-tree digests bind results to files. Digests alone do not authenticate evidence: publishing consumes the `heal-verified` artifact from its own trusted verification workflow run. The merge gate retrieves that artifact through GitHub, rather than trusting the ledger committed in the PR.
-- Privileged workflows check out only the default branch. They never execute candidate repository scripts. Third-party Actions and compiled GAW runtimes are pinned.
+A failed candidate publishes no fix branch. The failure has an Actions run record and diagnostic artifact. Another `/heal fix` request can use matching retained failure feedback to improve the code. There is **one candidate attempt per command**, not an unbounded retry loop. Bounded multi-attempt sessions remain future work.
 
-FoFo inspired the test-integrity comparison, but this repository does not vendor or depend on FoFo. Its small snapshot boundary is implemented here; integrating FoFo's broader test-quality gates remains optional after an audit.
+## Cost, history, and concurrency
 
-## Ledger and recovery
+- Claude model `claude-sonnet-5` and Claude Code `2.1.247` are pinned.
+- Each AI workflow has a 15-minute timeout, 40-turn limit, and 150 GAW AI-credit limit. AI credits are GAW's accounting unit, not a guaranteed dollar spending cap. Provider billing still applies.
+- Policy defaults to ten AI command attempts per issue, counting discussion and revisions too. Increasing this requires a reviewed policy change and fresh scope approval.
+- Command IDs are deduplicated; dispatch intent is persisted before the dispatch. One stage stays occupied while its work is running; fix work stays occupied while verification/publication awaits completion.
+- An uncertain dispatch fails closed instead of automatically retrying. An administrator must inspect Actions and state before repairing a stranded reservation.
+- `heal-state` stores original control comments, command intents, proposal mappings, and run outcomes as Git commits and individual event files. Deleting a recorded pause/revoke comment cannot remove its decision.
+- State is signed with Ed25519 and bound to its Git parent. The public key is anchored in default-branch policy; only trusted main-branch controller steps receive the private key from the `heal-control` environment. The model and candidate tests receive no signing key. Modified or replayed state fails closed.
+- Configure a ruleset preventing deletion and force pushes to `heal-state`. Invalid ordinary pushes cannot forge approvals, but can cause a denial of service. Administrators who can change environments, public keys, rulesets, or enforcement code remain outside this threat model.
+- Full successful evidence artifacts last 30 days; failure artifacts last 90 days. Persistent state retains run links/conclusions, not unlimited copies of logs.
+- Context is bounded to 150,000 characters. Oversized discussion fails before inference with an explanation; it is not silently truncated. Feedback logs are bounded diagnostics and explicitly treated as untrusted data.
 
-Every published fix includes `.self-heal/ledger/<run-id>.json`: approval references, scope/policy/base/test revisions, tree digests, verification results and workflow run ID. Full before/after logs are retained in the `heal-verified` artifact for 30 days. If that artifact expires before merge, the merge gate fails closed; rerun verification.
+GitHub event processing is asynchronous. Use a blocking review and pause during a disputed merge; revocation and merging are not one atomic operation. Cancellation can be delayed even though authorization checks block publication.
 
-Failed attempts have GitHub Actions logs but do not yet receive permanent versioned ledger entries. This is a stated MVP gap. No retry loop or spending aggregator is enabled: each maintainer dispatch initiates one candidate attempt. Re-running the same publisher after partial success may find its existing branch; inspect that branch/PR before starting a new attempt. Automatic reconciliation is not implemented yet.
+## Adopt and configure a copy
 
-The committed ledger is informational and does not hash itself. The evidence digest covers the candidate tree before the controller adds the ledger. Post-publication source changes invalidate the merge gate; generate a new verified attempt instead.
+New copies have no `HEAL_ENABLED` variable and therefore cannot run AI. The policy also binds this installation to its repository name, so copied owner IDs cannot accidentally authorize another installation.
 
-## Develop and validate
+1. Update `policy.repository`, all numeric role IDs in `.self-heal/policy.json`, and `.github/CODEOWNERS` for your own repository. Keep activation off during setup.
+2. Add `ANTHROPIC_API_KEY` to repository Actions secrets. Never commit the key.
+3. Allow Actions to create and approve PRs. Our controller still rejects bot test approvals.
+4. Protect the default branch: require a PR, human approval, CODEOWNERS review, stale review dismissal, emitted CI `test` and `Heal authorization`, and no bypass. Your GitHub plan must support enforcement.
+5. Create `heal-publish` with a required human reviewer and protected-branch deployment policy.
+6. Protect `heal-state` against force pushes and deletion. The bot must be able to append normal commits there.
+   Create `heal-control` with a custom deployment rule allowing only the default branch. For a fresh copy run `node .self-heal/bin/init-state-key.mjs --new-installation` once, store its private key as environment secret `HEAL_STATE_PRIVATE_KEY`, and delete the ignored local private file. Include the generated public key in the reviewed policy setup. Do not rotate an initialized installation's key this way: existing history must remain verifiable. This one-time key provisioning is setup work; normal issue and approval operations require no terminal.
+7. Enable `policy.enabled` through review, then set repository Actions variable `HEAL_ENABLED=true`.
+8. Run **Heal setup check** in Actions. The default Actions token may not have permission to read administration settings; in that case provide optional `HEAL_SETUP_TOKEN` with read access to the reported settings, or run the same read-only audit using an authenticated maintainer CLI. The audit never reads secret values or starts AI.
+
+All non-AI gate, command-recording, setup, and completion workflows use deterministic code. AI approvals never depend on an LLM interpreting a casual sentence.
+
+## Local validation
+
+Node 22+, no external package installation:
 
 ```sh
 npm test
@@ -78,27 +91,19 @@ npm run test:app
 npm run heal:doctor
 ```
 
-CI additionally runs the production Docker path. To run it locally on a machine with Docker:
+For the production Docker verifier, pull `node:22-bookworm-slim`, set `HEAL_DOCKER_TEST=1`, and run `npm test`. CI runs that test automatically. ZIP feedback extraction uses `unzip`, included on GitHub's Linux runner; local integration tests require it on PATH.
 
-```sh
-docker pull node:22-bookworm-slim
-HEAL_DOCKER_TEST=1 npm test
-```
+With `GITHUB_REPOSITORY` and `GH_TOKEN` set, `node .self-heal/bin/heal.mjs setup` audits remote configuration. `heal:doctor` only validates local policy.
 
-The default local verifier tests use only controlled fixtures and subprocesses. Never use local mode for untrusted model output.
+GAW sources are the three workflow Markdown files; committed lock files compile with gh-aw v0.88.7. Review generated changes before updating. See [GAW documentation](https://github.github.com/gh-aw/).
 
-GAW sources are the three `.github/workflows/heal-*.md` files. Compiled `.lock.yml` files are committed and generated with GAW **v0.88.7**. Regenerate after source edits and review the resulting diff. GAW is in public preview; upgrades require validation.
+## Current scope and upgrade notes
 
-## Manual end-to-end acceptance
-
-In a disposable configured repository, add an issue asking for a precisely specified change to `greet`, approve the printed scope command, generate and review tests, and dispatch implementation. Confirm a failing candidate produces no fix branch, a passing candidate produces a draft PR and ledger, and a dismissed review or changed PR file turns `Heal authorization` red. Approve CI execution if GitHub requests it. Never merge a knowingly failing test-only proposal.
-
-## Current limits
-
-- Small text repositories: 2,000 tree entries, 1 MB per file and 10 MB encoded snapshot maximum. REST snapshot collection favors clarity over speed.
-- Node standard-library tests only; no external dependencies, package-manager hooks, lint/typecheck/build adapters, migrations or deployment.
-- Manual test approval and manual implementation dispatch; no automatic coding from a public comment.
-- Human-reviewed merging; no post-merge repair/revert loop.
-- GitHub permissions protect against untrusted contributors, not administrators who can change the enforcement workflow itself.
-
-See [GitHub Agentic Workflows](https://github.com/github/gh-aw) for runtime documentation.
+- Standard-library Node `.test.mjs` projects only; no dependency installation, build/lint adapter, migrations, or deployment.
+- Small repository snapshot limits: 2,000 entries, 1 MB per file, 10 MB encoded snapshot. History lookup is bounded and fails closed when its limit is reached.
+- Revised tests open a new PR; they do not rewrite an old proposal. Close superseded test PRs after review; close the final tests-only PR after merging the fix.
+- Old test proposals created before command tracking must be regenerated with `/heal revise-tests N` and reviewed again. Upgrading policy invalidates old scope approvals.
+- Scope proposals currently cover the exact issue body, not an automatically accepted AI summary. Discussion comments cannot silently change scope.
+- A denied or cancelled model run can lack detailed test feedback; its workflow logs and durable outcome still explain where it stopped.
+- FoFo is not vendored. The controller implements its own test-integrity boundary.
+- No own-hosted-model adapter or automatic retry sessions were added in this change.

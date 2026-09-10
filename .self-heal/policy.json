@@ -1,13 +1,28 @@
 {
   "version": 1,
+  "repository": "S-Y-3-D/self-healing-template",
   "enabled": true,
   "roles": {
-    "maintainers": [105170917],
-    "testOwners": [105170917],
-    "administrators": [105170917]
+    "maintainers": [
+      105170917
+    ],
+    "testOwners": [
+      105170917
+    ],
+    "administrators": [
+      105170917
+    ]
   },
-  "implementationPaths": ["src/"],
-  "testPaths": ["tests/"],
+  "implementationPaths": [
+    "src/"
+  ],
+  "testPaths": [
+    "tests/"
+  ],
   "maxFiles": 10,
-  "maxBytes": 100000
+  "maxBytes": 100000,
+  "limits": {
+    "maxAttempts": 10
+  },
+  "statePublicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAmOFocvRZTuYwuUxBX3c0CqNxVXnfDWi5J7+PIGiAPbw=\n-----END PUBLIC KEY-----\n"
 }

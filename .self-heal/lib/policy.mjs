@@ -65,6 +65,8 @@ export function authorize(c) {
   requireThat(!reviews.some(r => r.state === 'CHANGES_REQUESTED'), 'Test review: changes requested');
   const approvals = reviews.filter(r => r.state === 'APPROVED' && r.commit_id === c.pr.head.sha);
   requireThat(approvals.length > 0, 'Missing human review of the exact test revision');
+  const priorObjections=[...latestReviews(c.previousReviews??[]).values()].filter(r=>member(p,'testOwners',r.user)&&r.state==='CHANGES_REQUESTED');
+  requireThat(priorObjections.every(r=>approvals.some(a=>a.user.id===r.user.id)), 'A prior test reviewer must approve this revised test head to resolve their objection');
   return { repository:c.repository, issue:c.issue.number, testPr:c.pr.number, scope, base:c.base,
     testHead:c.pr.head.sha, policyDigest:digest(JSON.stringify(p)), scopeApproval,
     testApprovals:approvals.map(r => r.id).sort((a,b)=>a-b) };

@@ -1,10 +1,11 @@
 import { authorize, authorizeScope, digest, sameAuthorization } from './policy.mjs';
 import { validateFiles, validateEvidence, applyCandidate } from './verification.mjs';
+import { readState, controlComments } from './state.mjs';
 
 export class GitHub {
   constructor(repository,token,origin='https://api.github.com') {
     if(!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Invalid repository');
-    this.repository=repository;this.token=token;this.origin=origin;this.root=`/repos/${repository}`;
+    this.repository=repository;this.token=token;this.origin=origin;this.root=`/repos/${repository}`;this.enforceStateSignature=true;
   }
   async request(path,method='GET',body) {
     const url=new URL(path,this.origin);
@@ -12,7 +13,7 @@ export class GitHub {
     const response=await fetch(url,{method,redirect:'error',signal:AbortSignal.timeout(30000),
       headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',...(this.token?{Authorization:`Bearer ${this.token}`}:{})},
       ...(body ? {body:JSON.stringify(body)}:{})});
-    if(!response.ok) throw new Error(`GitHub API ${method} failed (${response.status})`);
+    if(!response.ok) { const error=new Error(`GitHub API ${method} failed (${response.status})`);error.status=response.status;throw error; }
     return response;
   }
   async get(path) {return (await this.request(path)).json();}
@@ -31,12 +32,19 @@ export class GitHub {
     const ref=await this.get(`${this.root}/git/ref/heads/${encodeURIComponent(repo.default_branch)}`);
     const base=ref.object.sha;
     const file=await this.get(`${this.root}/contents/.self-heal/policy.json?ref=${base}`);
-    return {base,defaultBranch:repo.default_branch,policy:JSON.parse(Buffer.from(file.content,'base64').toString('utf8'))};
+    const policy=JSON.parse(Buffer.from(file.content,'base64').toString('utf8'));
+    if(policy.repository && policy.repository!==this.repository) throw new Error('Template copy is disabled: configure this repository and its own owner IDs');
+    return {base,defaultBranch:repo.default_branch,policy};
   }
   async scope(issueNumber) {
     const config=await this.configuration();
     const issue=await this.get(`${this.root}/issues/${positive(issueNumber)}`);
-    const comments=await this.list(`${this.root}/issues/${issue.number}/comments`);
+    const live=await this.list(`${this.root}/issues/${issue.number}/comments`);
+    const recorded=controlComments(await readState(this),issue.number);
+    // Immutable original controls survive edits/deletion. New live denials still
+    // take effect before the event recorder has caught up.
+    const comments=[...recorded,...live.filter(c=>!recorded.some(r=>r.id===c.id)),
+      ...live.filter(c=>recorded.some(r=>r.id===c.id && r.body!==c.body) && ['/heal pause','/heal revoke'].includes(c.body.trim()))];
     return {...config,issue,comments,scope:digest(issue.body??''),repository:this.repository};
   }
   async context(testPr) {
@@ -46,9 +54,47 @@ export class GitHub {
     c.scope=metadata.scope;c.pr=pr;
     c.files=await this.list(`${this.root}/pulls/${pr.number}/files`);
     c.reviews=await this.list(`${this.root}/pulls/${pr.number}/reviews`);
+    const state=await readState(this);
+    const commands=[...(pr.body??'').matchAll(/^Heal-Command: ([1-9][0-9]*)$/gm)];
+    if(commands.length!==1)throw new Error('Test proposal needs one trusted Heal-Command reference; request new tests after upgrading');
+    const proposalRecord=state.events.find(e=>e.type==='proposal'&&e.prNumber===pr.number);
+    if(!proposalRecord||proposalRecord.commandId!==commands[0][1])throw new Error('Test proposal command does not match its immutable publication record; wait for command completion');
+    const intent=state.events.find(e=>e.type==='intent'&&e.commandId===commands[0][1]);
+    if(!intent||intent.stage!=='tests'||intent.issue!==c.issue.number||intent.scope!==c.scope||intent.base!==c.base)throw new Error('Test proposal command does not match approved scope/base');
+    const revisionRefs=[...(pr.body??'').matchAll(/^Heal-Revises: #([1-9][0-9]*)$/gm)];
+    if(intent.revisionPr ? revisionRefs.length!==1||Number(revisionRefs[0][1])!==intent.revisionPr : revisionRefs.length!==0)throw new Error('Test revision metadata must match its trusted command');
     // A PR base field follows main; compare merge-base as well to reject stale branches.
     const comparison=await this.get(`${this.root}/compare/${c.base}...${pr.head.sha}`);
     if(comparison.merge_base_commit?.sha!==c.base) throw new Error('Test branch must contain the current base');
+    c.previousReviews=[];
+    const visited=new Set([pr.number]);let previous=pr;let previousIntent=intent;
+    for(let depth=0;depth<10;depth++) {
+      if(!previousIntent.revisionPr) break;
+      if(depth===9)throw new Error('Test revision chain too long');
+      const number=positive(previousIntent.revisionPr);
+      if(visited.has(number))throw new Error('Invalid test revision chain');visited.add(number);
+      previous=await this.get(`${this.root}/pulls/${number}`);
+      const meta=parseProposal(previous.body??'');
+      if(meta.issue!==c.issue.number || previous.base.repo?.full_name!==this.repository) throw new Error('Foreign test revision');
+      c.previousReviews.push(...await this.list(`${this.root}/pulls/${number}/reviews`));
+      const ids=[...(previous.body??'').matchAll(/^Heal-Command: ([1-9][0-9]*)$/gm)];
+      const record=state.events.find(e=>e.type==='proposal'&&e.prNumber===number);
+      if(record) {
+        previousIntent=state.events.find(e=>e.type==='intent'&&e.commandId===record.commandId);
+        if(!previousIntent||previousIntent.stage!=='tests'||previousIntent.issue!==c.issue.number)throw new Error('Invalid recorded ancestor');
+        continue;
+      }
+      if(!ids.length) {
+        // A pre-command-system proposal may be the first ancestor only. Do not
+        // trust mutable ancestry it claims; command-era predecessors require IDs.
+        if(/^Heal-Revises:/m.test(previous.body??''))throw new Error('Unbound historical test ancestry');
+        break;
+      }
+      if(ids.length!==1)throw new Error('Ambiguous ancestor command');
+      previousIntent=state.events.find(e=>e.type==='intent'&&e.commandId===ids[0][1]);
+      if(!previousIntent||previousIntent.stage!=='tests'||previousIntent.issue!==c.issue.number)throw new Error('Unbound ancestor command');
+      if(depth===9) throw new Error('Test revision chain too long');
+    }
     c.authorization=authorize(c);return c;
   }
   async snapshot(sha) {
