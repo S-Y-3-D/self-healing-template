@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { digest, validateCandidate, sameAuthorization } from './policy.mjs';
+import { createFailureFeedback } from './feedback.mjs';
 
 export function validateFiles(files) {
   if (!files || typeof files !== 'object' || Array.isArray(files) || Object.keys(files).length > 2000) throw new Error('Invalid snapshot');
@@ -53,11 +54,11 @@ async function runSuite(files,policy,sandbox) {
       : args;
     const r=spawnSync(command,options,{cwd,encoding:'utf8',timeout:120000,maxBuffer:2000000,
       env:{PATH:process.env.PATH,SystemRoot:process.env.SystemRoot,TEMP:process.env.TEMP,TMP:process.env.TMP}});
-    if(r.error || r.signal || r.status===null) throw new Error('Test runner failed or timed out');
     const output=(r.stdout??'')+'\n'+(r.stderr??'');
+    if(r.error || r.signal || r.status===null) throw Object.assign(new Error('Test runner failed or timed out'),{output});
     const count=Number(output.match(/^# tests (\d+)$/m)?.[1]??0);
     const skip=Number(output.match(/^# skipped (\d+)$/m)?.[1]??0)+Number(output.match(/^# todo (\d+)$/m)?.[1]??0);
-    if(!count || skip) throw new Error('No tests or skipped tests in required suite');
+    if(!count || skip) throw Object.assign(new Error('No tests or skipped tests in required suite'),{output});
     return {status:r.status, count, assertions:(output.match(/code: 'ERR_ASSERTION'/g)??[]).length,
       failures:Number(output.match(/^# fail (\d+)$/m)?.[1]??0), output};
   } finally {
@@ -66,23 +67,41 @@ async function runSuite(files,policy,sandbox) {
   }
 }
 export async function verifyTests(p,{sandbox='local'}={}) {
+  let stage='snapshot';const logs={};
+  try {
   validateTestSnapshot(p.baseFiles,p.testFiles,p.policy);
+  stage='baseline';
   const baseline=await runSuite(p.baseFiles,p.policy,sandbox);
+  logs.baseline=baseline.output;
   if(baseline.status!==0) throw new Error('Existing baseline tests fail');
+  stage='regression';
   const regression=await runSuite(p.testFiles,p.policy,sandbox);
+  logs.regression=regression.output;
   if(regression.status===0 || regression.assertions===0 || regression.assertions!==regression.failures) throw new Error('Regression must fail on assertions only');
   return {baseline,regression};
+  } catch(error) {
+    if(error.output) logs[stage]=error.output;
+    error.feedback=createFailureFeedback(Object.assign(error,{feedback:{stage,logs}}),p);throw error;
+  }
 }
 export async function verify(p,{sandbox='local'}={}) {
+  let stage='candidate-validation';const logs={};
+  try {
   // local is for this package's controlled fixtures; the CLI always selects docker.
   const candidateFiles=applyCandidate(p.testFiles,p.candidate,p.policy);
   const {baseline,regression}=await verifyTests(p,{sandbox});
+  stage='candidate';logs.baseline=baseline.output;logs.regression=regression.output;
   const candidate=await runSuite(candidateFiles,p.policy,sandbox);
+  logs.candidate=candidate.output;
   if(candidate.status!==0 || candidate.count!==regression.count) throw new Error('Candidate tests failed or test count changed');
   return {version:1,authorization:p.authorization,candidate:p.candidate,
     candidateDigest:digest(JSON.stringify(p.candidate)),testDigest:treeDigest(p.testFiles),treeDigest:treeDigest(candidateFiles),
     results:{baseline:'pass',regression:'expected-failure',candidate:'pass',testCount:candidate.count},
     logs:{baseline:baseline.output,regression:regression.output,candidate:candidate.output},sandbox};
+  } catch(error) {
+    if(error.output) logs[stage]=error.output;
+    error.feedback=createFailureFeedback(Object.assign(error,{feedback:error.feedback??{stage,logs}}),p);throw error;
+  }
 }
 export function validateEvidence(e,p) {
   // Authenticity comes from the trusted same-run Actions artifact, not this JSON.
